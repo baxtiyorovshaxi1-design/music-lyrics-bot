@@ -27,6 +27,8 @@ API kalitlar:
 """
 
 import io, hmac, hashlib, base64, time, logging, asyncio, re, json, os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 from pathlib import Path
 
@@ -376,7 +378,7 @@ async def _try_download(search_query: str, out_path: str) -> str | None:
         "noplaylist":  True,
     }
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).download([search_query]))
         mp3 = out_path + ".mp3"
         return mp3 if Path(mp3).exists() else None
@@ -713,9 +715,27 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"📣 Broadcast tugadi!\n✅ Yuborildi: {sent}\n❌ Xato: {fail}")
 
 # ══════════════════════════════════════════
-#  MAIN
+#  MAIN VA DUMMY SERVER (Render uchun)
 # ══════════════════════════════════════════
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+
+def keep_alive():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), DummyHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
 def main():
+    keep_alive()  # Render uchun port band qilish
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start",     start))
