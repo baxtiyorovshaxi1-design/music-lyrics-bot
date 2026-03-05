@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*$py.class
+bot_db.json
+.env
+venv/
+env/
+.venv/
