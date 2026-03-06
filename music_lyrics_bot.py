@@ -290,6 +290,7 @@ async def identify_song(audio_bytes: bytes) -> dict | None:
         hmac.new(ACR_ACCESS_SECRET.encode(), string_to_sign.encode(), hashlib.sha1).digest()
     ).decode()
     url = f"https://{ACR_HOST}/v1/identify"
+    logger.info(f"ACRCloud: {len(audio_bytes)} bayt audio => {url}")
     try:
         async with aiohttp.ClientSession() as session:
             form = aiohttp.FormData()
@@ -299,17 +300,21 @@ async def identify_song(audio_bytes: bytes) -> dict | None:
             form.add_field("signature",         signature)
             form.add_field("data_type",         "audio")
             form.add_field("signature_version", "1")
-            form.add_field("sample", audio_bytes, filename="audio.mp3", content_type="audio/mpeg")
-            async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            form.add_field("sample", audio_bytes, filename="sample.wav", content_type="audio/wav")
+            async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                 data = await resp.json()
-        if data.get("status", {}).get("code") != 0:
+        status_code = data.get("status", {}).get("code")
+        status_msg  = data.get("status", {}).get("msg", "")
+        logger.info(f"ACRCloud javob: code={status_code}, msg={status_msg}")
+        if status_code != 0:
             return None
         music  = data["metadata"]["music"][0]
         title  = music.get("title", "")
         artist = music["artists"][0]["name"] if music.get("artists") else ""
+        logger.info(f"ACRCloud topdi: {artist} - {title}")
         return {"title": title, "artist": artist}
     except Exception as e:
-        logger.error(f"ACRCloud: {e}")
+        logger.error(f"ACRCloud xato: {e}")
         return None
 
 # ══════════════════════════════════════════
