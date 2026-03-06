@@ -367,10 +367,22 @@ async def get_lyrics_genius(artist: str, title: str) -> str | None:
                 timeout=aiohttp.ClientTimeout(total=15)
             ) as resp:
                 html = await resp.text()
+        # 1-usul: window.__PRELOADED_STATE__ JSON dan lyrics olish (JS rendersiz ishlaydi)
+        state_match = re.search(r'window\.__PRELOADED_STATE__\s*=\s*JSON\.parse\((.*?)\);', html, re.DOTALL)
+        if state_match:
+            try:
+                state_json_str = json.loads(state_match.group(1))
+                state = json.loads(state_json_str)
+                lyrics = state.get("songPage", {}).get("lyricsData", {}).get("body", {}).get("plain", "")
+                if lyrics and lyrics.strip():
+                    logger.info(f"Genius __PRELOADED_STATE__ dan topildi: {len(lyrics)} belgi")
+                    return lyrics.strip()
+            except Exception as ex:
+                logger.warning(f"Genius state parse: {ex}")
+        # 2-usul: eski HTML div pattern
         patterns = [
             r'<div[^>]*data-lyrics-container[^>]*>(.*?)</div>',
             r'<div[^>]*class="[^"]*Lyrics__Container[^"]*"[^>]*>(.*?)</div>',
-            r'<div[^>]*class="lyrics"[^>]*>(.*?)</div>',
         ]
         lyrics = ""
         for pattern in patterns:
@@ -384,9 +396,9 @@ async def get_lyrics_genius(artist: str, title: str) -> str | None:
                 break
         lyrics = lyrics.strip()
         if lyrics:
-            logger.info(f"Genius lyrics topildi: {len(lyrics)} belgi")
+            logger.info(f"Genius HTML dan topildi: {len(lyrics)} belgi")
             return lyrics
-        logger.warning("Genius: HTML pattern mos kelmadi")
+        logger.warning("Genius: hech bir usul ishlamadi")
         return None
     except Exception as e:
         logger.error(f"Genius xato: {e}")
@@ -406,7 +418,11 @@ async def get_lyrics_musixmatch(artist: str, title: str) -> str | None:
         if not raw.strip():
             return None
         data = json.loads(raw)
-        lyrics_body = data.get("message", {}).get("body", {}).get("lyrics", {}).get("lyrics_body")
+        body = data.get("message", {}).get("body", {})
+        # body ba'zan natija yo'qligida [] (list) bo'lib keladi
+        if not isinstance(body, dict):
+            return None
+        lyrics_body = body.get("lyrics", {}).get("lyrics_body")
         if lyrics_body:
             # Musixmatch bepul versiyada oxirida reklama matni qo'shadi — uni olib tashlaymiz
             lyrics_body = lyrics_body.split("******* This Lyrics")[0].strip()
