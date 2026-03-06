@@ -302,7 +302,8 @@ async def identify_song(audio_bytes: bytes) -> dict | None:
             form.add_field("signature_version", "1")
             form.add_field("sample", audio_bytes, filename="sample.wav", content_type="audio/wav")
             async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                data = await resp.json()
+                raw_text = await resp.text()
+        data = json.loads(raw_text)
         status_code = data.get("status", {}).get("code")
         status_msg  = data.get("status", {}).get("msg", "")
         logger.info(f"ACRCloud javob: code={status_code}, msg={status_msg}")
