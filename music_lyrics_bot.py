@@ -340,16 +340,21 @@ async def get_lyrics_ovh(artist: str, title: str) -> str | None:
 async def get_lyrics_genius(artist: str, title: str) -> str | None:
     headers = {
         "Authorization": f"Bearer {GENIUS_TOKEN}",
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": "Mozilla/5.0 (compatible)",
     }
     try:
-        async with aiohttp.ClientSession(headers=headers) as session:
+        async with aiohttp.ClientSession() as session:
             async with session.get(
                 "https://api.genius.com/search",
+                headers=headers,
                 params={"q": f"{title} {artist}"},
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
-                data = await resp.json(content_type=None)
+                raw = await resp.text()
+            if not raw.strip():
+                logger.warning("Genius: bo'sh javob (token noto'g'ri bo'lishi mumkin)")
+                return None
+            data = json.loads(raw)
             hits = data.get("response", {}).get("hits", [])
             if not hits:
                 logger.info(f"Genius: topilmadi '{title} {artist}'")
@@ -358,11 +363,10 @@ async def get_lyrics_genius(artist: str, title: str) -> str | None:
             logger.info(f"Genius URL: {song_url}")
             async with session.get(
                 song_url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"},
                 timeout=aiohttp.ClientTimeout(total=15)
             ) as resp:
                 html = await resp.text()
-        # Genius yangi HTML tuzilmasi uchun bir nechta pattern sinab ko'ramiz
         patterns = [
             r'<div[^>]*data-lyrics-container[^>]*>(.*?)</div>',
             r'<div[^>]*class="[^"]*Lyrics__Container[^"]*"[^>]*>(.*?)</div>',
@@ -380,40 +384,51 @@ async def get_lyrics_genius(artist: str, title: str) -> str | None:
                 break
         lyrics = lyrics.strip()
         if lyrics:
-            logger.info(f"Genius, lyrics topildi: {len(lyrics)} belgi")
+            logger.info(f"Genius lyrics topildi: {len(lyrics)} belgi")
             return lyrics
-        logger.warning("Genius: lyrics topilmadi (HTML pattern mos kelmadi)")
+        logger.warning("Genius: HTML pattern mos kelmadi")
         return None
     except Exception as e:
         logger.error(f"Genius xato: {e}")
         return None
 
 async def get_lyrics_musixmatch(artist: str, title: str) -> str | None:
-    """Musixmatch API yordamida lyrics olish"""
+    """Musixmatch bepul API orqali lyrics olish"""
+    APIKEY = "2005b5cd5a213e5f9a84a6e43e3b5d3a"  # bepul ochiq kalit
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 "https://api.musixmatch.com/ws/1.1/matcher.lyrics.get",
-                params={
-                    "q_track": title,
-                    "q_artist": artist,
-                    "apikey": "live_your_api_key_here",  # bepul kalitlar bor
-                    "format": "json",
-                },
+                params={"q_track": title, "q_artist": artist, "apikey": APIKEY},
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
-                data = await resp.json(content_type=None)
-        return data.get("message", {}).get("body", {}).get("lyrics", {}).get("lyrics_body") or None
-    except Exception:
+                raw = await resp.text()
+        if not raw.strip():
+            return None
+        data = json.loads(raw)
+        lyrics_body = data.get("message", {}).get("body", {}).get("lyrics", {}).get("lyrics_body")
+        if lyrics_body:
+            # Musixmatch bepul versiyada oxirida reklama matni qo'shadi — uni olib tashlaymiz
+            lyrics_body = lyrics_body.split("******* This Lyrics")[0].strip()
+            logger.info(f"Musixmatch lyrics topildi: {len(lyrics_body)} belgi")
+        return lyrics_body or None
+    except Exception as e:
+        logger.warning(f"Musixmatch: {e}")
         return None
 
 async def find_lyrics(artist: str, title: str) -> str | None:
     logger.info(f"Lyrics qidirilmoqda: {artist} - {title}")
+    # 1) lyrics.ovh
     lyrics = await get_lyrics_ovh(artist, title)
     if lyrics:
         logger.info("lyrics.ovh dan topildi!")
         return lyrics
+    # 2) Genius
     lyrics = await get_lyrics_genius(artist, title)
+    if lyrics:
+        return lyrics
+    # 3) Musixmatch (zaxira)
+    lyrics = await get_lyrics_musixmatch(artist, title)
     if lyrics:
         return lyrics
     logger.info("Lyrics topilmadi (barcha manbalar)")
