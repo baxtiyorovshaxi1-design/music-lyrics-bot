@@ -330,58 +330,108 @@ async def get_lyrics_ovh(artist: str, title: str) -> str | None:
             ) as resp:
                 if resp.status != 200:
                     return None
-                return (await resp.json()).get("lyrics") or None
-    except Exception:
+                data = await resp.json(content_type=None)
+                lyrics = data.get("lyrics")
+                return lyrics.strip() if lyrics else None
+    except Exception as e:
+        logger.warning(f"lyrics.ovh: {e}")
         return None
 
 async def get_lyrics_genius(artist: str, title: str) -> str | None:
-    headers = {"Authorization": f"Bearer {GENIUS_TOKEN}"}
+    headers = {
+        "Authorization": f"Bearer {GENIUS_TOKEN}",
+        "User-Agent": "Mozilla/5.0",
+    }
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(
                 "https://api.genius.com/search",
-                headers=headers,
                 params={"q": f"{title} {artist}"},
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
-                data = await resp.json()
+                data = await resp.json(content_type=None)
             hits = data.get("response", {}).get("hits", [])
             if not hits:
+                logger.info(f"Genius: topilmadi '{title} {artist}'")
                 return None
-            async with session.get(hits[0]["result"]["url"],
-                                   timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            song_url = hits[0]["result"]["url"]
+            logger.info(f"Genius URL: {song_url}")
+            async with session.get(
+                song_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
                 html = await resp.text()
-        parts = re.findall(r'<div[^>]*data-lyrics-container[^>]*>(.*?)</div>', html, re.DOTALL)
-        if not parts:
-            return None
+        # Genius yangi HTML tuzilmasi uchun bir nechta pattern sinab ko'ramiz
+        patterns = [
+            r'<div[^>]*data-lyrics-container[^>]*>(.*?)</div>',
+            r'<div[^>]*class="[^"]*Lyrics__Container[^"]*"[^>]*>(.*?)</div>',
+            r'<div[^>]*class="lyrics"[^>]*>(.*?)</div>',
+        ]
         lyrics = ""
-        for part in parts:
-            clean   = re.sub(r'<br\s*/?>', "\n", part)
-            clean   = re.sub(r'<[^>]+>', "", clean)
-            lyrics += clean + "\n"
-        return lyrics.strip() or None
+        for pattern in patterns:
+            parts = re.findall(pattern, html, re.DOTALL)
+            if parts:
+                for part in parts:
+                    clean = re.sub(r'<br\s*/?>', "\n", part)
+                    clean = re.sub(r'<[^>]+>', "", clean)
+                    clean = re.sub(r'\[.*?\]', "", clean)
+                    lyrics += clean + "\n"
+                break
+        lyrics = lyrics.strip()
+        if lyrics:
+            logger.info(f"Genius, lyrics topildi: {len(lyrics)} belgi")
+            return lyrics
+        logger.warning("Genius: lyrics topilmadi (HTML pattern mos kelmadi)")
+        return None
     except Exception as e:
-        logger.error(f"Genius: {e}")
+        logger.error(f"Genius xato: {e}")
+        return None
+
+async def get_lyrics_musixmatch(artist: str, title: str) -> str | None:
+    """Musixmatch API yordamida lyrics olish"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.musixmatch.com/ws/1.1/matcher.lyrics.get",
+                params={
+                    "q_track": title,
+                    "q_artist": artist,
+                    "apikey": "live_your_api_key_here",  # bepul kalitlar bor
+                    "format": "json",
+                },
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                data = await resp.json(content_type=None)
+        return data.get("message", {}).get("body", {}).get("lyrics", {}).get("lyrics_body") or None
+    except Exception:
         return None
 
 async def find_lyrics(artist: str, title: str) -> str | None:
+    logger.info(f"Lyrics qidirilmoqda: {artist} - {title}")
     lyrics = await get_lyrics_ovh(artist, title)
     if lyrics:
+        logger.info("lyrics.ovh dan topildi!")
         return lyrics
-    return await get_lyrics_genius(artist, title)
+    lyrics = await get_lyrics_genius(artist, title)
+    if lyrics:
+        return lyrics
+    logger.info("Lyrics topilmadi (barcha manbalar)")
+    return None
 
 # ══════════════════════════════════════════
-#  MP3 — YouTube → SoundCloud → Spotify
+#  MP3 — YouTube (iOS bypass) → SoundCloud
 # ══════════════════════════════════════════
-async def _try_download(search_query: str, out_path: str) -> str | None:
+async def _try_download(search_query: str, out_path: str, extra_opts: dict = {}) -> str | None:
     ydl_opts = {
         "format":         "bestaudio/best",
         "outtmpl":        out_path + ".%(ext)s",
         "postprocessors": [{"key": "FFmpegExtractAudio",
-                            "preferredcodec": "mp3", "preferredquality": "192"}],
+                            "preferredcodec": "mp3", "preferredquality": "128"}],
         "quiet":       True,
         "no_warnings": True,
         "noplaylist":  True,
+        **extra_opts,
     }
     try:
         loop = asyncio.get_running_loop()
@@ -389,16 +439,40 @@ async def _try_download(search_query: str, out_path: str) -> str | None:
         mp3 = out_path + ".mp3"
         return mp3 if Path(mp3).exists() else None
     except Exception as e:
-        logger.warning(f"Download ({search_query[:30]}): {e}")
+        logger.warning(f"Download ({search_query[:40]}): {e}")
         return None
 
 async def download_mp3(title: str, artist: str) -> str | None:
-    query    = f"{artist} {title} official audio"
-    out_path = f"/tmp/{title}_{artist}".replace(" ", "_")[:50]
-    for source in [f"ytsearch1:{query}", f"scsearch1:{query}", f"spsearch1:{query}"]:
-        mp3 = await _try_download(source, out_path)
-        if mp3:
-            return mp3
+    query    = f"{artist} {title}"
+    out_path = f"/tmp/{title}_{artist}".replace(" ", "_")[:60]
+
+    # 1) YouTube — iOS player client (bot deteksiyasini chetlab o'tadi)
+    mp3 = await _try_download(
+        f"ytsearch1:{query} audio",
+        out_path,
+        {"extractor_args": {"youtube": {"player_client": ["ios"]}}}
+    )
+    if mp3:
+        logger.info("YouTube iOS dan yuklab olindi!")
+        return mp3
+
+    # 2) YouTube — web_creator client
+    mp3 = await _try_download(
+        f"ytsearch1:{query}",
+        out_path,
+        {"extractor_args": {"youtube": {"player_client": ["web_creator"]}}}
+    )
+    if mp3:
+        logger.info("YouTube web_creator dan yuklab olindi!")
+        return mp3
+
+    # 3) SoundCloud
+    mp3 = await _try_download(f"scsearch1:{query}", out_path)
+    if mp3:
+        logger.info("SoundCloud dan yuklab olindi!")
+        return mp3
+
+    logger.info("MP3 topilmadi (barcha manbalar)")
     return None
 
 # ══════════════════════════════════════════
